@@ -4,7 +4,7 @@ A demonstration of OAuth authentication with Google services using the Model Con
 
 ## Overview
 
-This project showcases how to implement OAuth 2.0 authentication for Google services (YouTube and Google Drive) within an MCP server. It provides tools for authenticating users and accessing Google APIs securely.
+This project showcases how to implement OAuth 2.0 authentication for Google services (For example youtube and drive access) within an MCP server. It provides tools for authenticating users and accessing Google APIs securely.
 
 ## Features
 
@@ -50,9 +50,9 @@ This project showcases how to implement OAuth 2.0 authentication for Google serv
 
 ## Usage
 
-1. **Start the MCP server:**
+1. **Test the MCP server in the inspector:**
    ```bash
-   python simplemcp.py
+   npx @modelcontextprotocol/inspector uv --directory . run python simplemcp.py
    ```
 
 2. **Authenticate with Google:**
