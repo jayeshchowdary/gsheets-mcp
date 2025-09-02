@@ -23,7 +23,7 @@ A Model Context Protocol (MCP) server that provides tools for interacting with G
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
+git clone https://github.com/jayeshchowdary/gsheets-mcp
 cd gsheets-mcp
 
 # Install dependencies with UV
