@@ -6,7 +6,7 @@ Get your Google Sheets MCP Server running in 5 minutes!
 
 ```bash
 # 1. Clone and enter project
-git clone <your-repo-url>
+git clone https://github.com/jayeshchowdary/gsheets-mcp
 cd gsheets-mcp
 
 # 2. Install UV (if not installed)
