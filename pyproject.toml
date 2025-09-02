@@ -1,13 +1,18 @@
 [project]
 name = "oauthmcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "Google Sheets MCP Server with OAuth2 authentication"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "mcp[cli]>=1.9.4",
-  "google-auth>=2.35.0",
-  "google-auth-oauthlib>=1.2.0",
-  "google-api-python-client>=2.151.0",
-  "python-dotenv>=1.1.1",
+    "fastmcp>=2.0.0",
+    "google-auth>=2.35.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-api-python-client>=2.151.0",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
 ]

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "google-sheets": {
+      "description": "Google Sheets MCP server with OAuth2 authentication",
+      "command": "uv",
+      "args": ["run", "simplemcp.py"],
+      "env": {
+        "GSHEETS_CREDENTIALS_PATH": "./credentials.json",
+        "GSHEETS_TOKEN_PATH": "./.token.json"
+      },
+      "cwd": "."
+    }
+  }
+}
