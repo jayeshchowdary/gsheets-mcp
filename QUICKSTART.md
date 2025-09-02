@@ -7,7 +7,7 @@ Get your Google Sheets MCP Server running in 5 minutes!
 ```bash
 # 1. Clone and enter project
 git clone <your-repo-url>
-cd oauthmcp
+cd gsheets-mcp
 
 # 2. Install UV (if not installed)
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -49,7 +49,7 @@ Connect to your server:
 ## 📁 Project Structure
 
 ```
-oauthmcp/
+gsheets-mcp/
 ├── simplemcp.py            # Main MCP server
 ├── authenticate.py          # Authentication script
 ├── setup.py                # Setup helper
