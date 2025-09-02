@@ -24,7 +24,7 @@ A Model Context Protocol (MCP) server that provides tools for interacting with G
 ```bash
 # Clone the repository
 git clone <your-repo-url>
-cd oauthmcp
+cd gsheets-mcp
 
 # Install dependencies with UV
 uv sync
@@ -62,7 +62,7 @@ npx @modelcontextprotocol/inspector
 ## Project Structure
 
 ```
-oauthmcp/
+gsheets-mcp/
 ├── pyproject.toml          # UV project configuration
 ├── uv.lock                 # Locked dependencies
 ├── simplemcp.py            # Main MCP server
