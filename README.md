@@ -6,8 +6,7 @@ A Model Context Protocol (MCP) server that provides tools for interacting with G
 
 - **Authentication**: OAuth2-based authentication with Google APIs
 - **Google Sheets**: Create, read, update, and delete spreadsheets and worksheets
-- **Google Drive**: Search and manage files
-- **Data Operations**: Batch operations, data filtering, and SQL-like queries
+- **Data Operations**: Batch operations and data filtering
 - **Formatting**: Cell formatting, charts, and conditional formatting
 
 ## Prerequisites
