@@ -134,8 +134,13 @@ class GoogleSheet:
 
 
 @simple_mcp.tool()
-async def list_sheets() -> list[GoogleSheet]:
-    """List all Google Sheets in your Google Drive"""
+async def list_sheets(max_results: int = 50, page_token: str | None = None) -> dict:
+    """List Google Sheets in your Google Drive with pagination support
+    
+    Args:
+        max_results: Maximum number of sheets to return (1-1000). Defaults to 50.
+        page_token: Token for the next page of results. Use this for pagination.
+    """
     global creds
 
     # Check if credentials are available
@@ -164,38 +169,121 @@ async def list_sheets() -> list[GoogleSheet]:
                 "error": "Authentication required"
             }
     
+    # Validate max_results parameter
+    if max_results < 1 or max_results > 1000:
+        return {
+            "successful": False,
+            "message": "Error: max_results must be between 1 and 1000",
+            "error": "Invalid max_results value"
+        }
+    
     try:
         # Build the Drive service
         service = build('drive', 'v3', credentials=creds)
         
-        # Search for all spreadsheet files
-        results = service.files().list(
-            q="mimeType='application/vnd.google-apps.spreadsheet'",
-            pageSize=100,
-            fields="files(id, name)"
-        ).execute()
+        # Prepare the request parameters
+        request_params = {
+            'q': "mimeType='application/vnd.google-apps.spreadsheet'",
+            'pageSize': max_results,
+            'fields': "nextPageToken, files(id, name, createdTime, modifiedTime, size, owners, shared, starred, trashed, webViewLink)"
+        }
+        
+        # Add page token if provided
+        if page_token:
+            request_params['pageToken'] = page_token
+        
+        # Search for spreadsheet files
+        results = service.files().list(**request_params).execute()
         
         files = results.get('files', [])
+        next_page_token = results.get('nextPageToken')
         
         if not files:
             return {
                 "successful": True,
                 "message": "No Google Sheets found in your Drive",
-                "sheets": []
+                "sheets": [],
+                "pagination": {
+                    "has_more": False,
+                    "next_page_token": None,
+                    "total_estimated": 0
+                },
+                "summary": {
+                    "returned_count": 0,
+                    "max_results": max_results
+                }
             }
         
         # Format the response
         sheets = []
         for file in files:
-            sheets.append({
-                "name": file['name'],
-                "id": file['id']
-            })
+            sheet_info = {
+                "name": file.get('name', ''),
+                "id": file.get('id', ''),
+                "created_time": file.get('createdTime', ''),
+                "modified_time": file.get('modifiedTime', ''),
+                "size": file.get('size', '0'),
+                "shared": file.get('shared', False),
+                "starred": file.get('starred', False),
+                "trashed": file.get('trashed', False),
+                "web_view_link": file.get('webViewLink', ''),
+                "owners": [owner.get('displayName', '') for owner in file.get('owners', []) if isinstance(owner, dict)]
+            }
+            
+            # Add human-readable dates
+            if sheet_info['created_time']:
+                try:
+                    from datetime import datetime
+                    created_dt = datetime.fromisoformat(sheet_info['created_time'].replace('Z', '+00:00'))
+                    sheet_info['created_date'] = created_dt.strftime('%Y-%m-%d %H:%M:%S')
+                except:
+                    sheet_info['created_date'] = sheet_info['created_time']
+            
+            if sheet_info['modified_time']:
+                try:
+                    from datetime import datetime
+                    modified_dt = datetime.fromisoformat(sheet_info['modified_time'].replace('Z', '+00:00'))
+                    sheet_info['modified_date'] = modified_dt.strftime('%Y-%m-%d %H:%M:%S')
+                except:
+                    sheet_info['modified_date'] = sheet_info['modified_time']
+            
+            # Add size in human-readable format
+            if sheet_info['size'] != '0':
+                try:
+                    size_bytes = int(sheet_info['size'])
+                    if size_bytes < 1024:
+                        sheet_info['size_formatted'] = f"{size_bytes} B"
+                    elif size_bytes < 1024 * 1024:
+                        sheet_info['size_formatted'] = f"{size_bytes / 1024:.1f} KB"
+                    else:
+                        sheet_info['size_formatted'] = f"{size_bytes / (1024 * 1024):.1f} MB"
+                except:
+                    sheet_info['size_formatted'] = sheet_info['size']
+            else:
+                sheet_info['size_formatted'] = "0 B"
+            
+            sheets.append(sheet_info)
+        
+        # Build pagination info
+        pagination_info = {
+            "has_more": next_page_token is not None,
+            "next_page_token": next_page_token,
+            "total_estimated": len(sheets) + (len(sheets) if next_page_token else 0)  # Rough estimate
+        }
+        
+        # Build summary info
+        summary_info = {
+            "returned_count": len(sheets),
+            "max_results": max_results,
+            "page_number": 1 if not page_token else "N/A"  # Google doesn't provide page numbers
+        }
         
         return {
             "successful": True,
-            "message": f"Found {len(sheets)} Google Sheets",
-            "sheets": sheets
+            "message": f"Found {len(sheets)} Google Sheets (showing up to {max_results})",
+            "sheets": sheets,
+            "pagination": pagination_info,
+            "summary": summary_info
         }
         
     except Exception as e:
@@ -3006,62 +3094,67 @@ def _find_main_table(values: list, sheet_title: str, sheet_id: int, min_rows: in
     if len(values) < 2:
         return None
     
-    # Find the data boundary
-    data_end_row = len(values)
-    data_end_col = max(len(row) for row in values) if values else 0
-    
-    # Find the actual data boundary (last non-empty row/column)
-    for row_idx in range(len(values) - 1, 0, -1):
-        if any(cell.strip() for cell in values[row_idx] if cell):
-            data_end_row = row_idx + 1
-            break
-    
-    # Find the last non-empty column
-    for col_idx in range(data_end_col - 1, -1, -1):
-        for row_idx in range(len(values)):
-            if row_idx < len(values) and col_idx < len(values[row_idx]):
-                if values[row_idx][col_idx].strip():
-                    data_end_col = col_idx + 1
+    # Instead of finding one big table, look for the first well-formed table
+    # This prevents detecting the entire sheet as one table
+    for row_idx in range(len(values) - min_rows):
+        if _is_likely_header_row(values[row_idx]):
+            # Check if there's enough data below this header
+            data_rows = 0
+            table_end = row_idx + 1
+            
+            # Look for the end of this table (empty row or different structure)
+            for check_row in range(row_idx + 1, len(values)):
+                if _is_empty_row(values[check_row]):
+                    # Found empty row, table ends here
+                    table_end = check_row
                     break
-        else:
-            continue
-        break
+                elif _is_likely_header_row(values[check_row]):
+                    # Found another header, table ends before this
+                    table_end = check_row
+                    break
+                else:
+                    data_rows += 1
+            
+            if data_rows >= min_rows:
+                table_data = values[row_idx:table_end]
+                # Find the actual column boundary for this table
+                max_cols = 0
+                for row in table_data:
+                    for col_idx, cell in enumerate(row):
+                        if cell and str(cell).strip():
+                            max_cols = max(max_cols, col_idx + 1)
+                
+                if max_cols >= min_columns:
+                    # Trim the table data to actual columns
+                    trimmed_table_data = []
+                    for row in table_data:
+                        trimmed_row = row[:max_cols]
+                        # Pad if necessary
+                        while len(trimmed_row) < max_cols:
+                            trimmed_row.append('')
+                        trimmed_table_data.append(trimmed_row)
+                    
+                    confidence = _calculate_table_confidence(trimmed_table_data)
+                    table_name = _generate_table_name(trimmed_table_data[0] if trimmed_table_data else [], sheet_title)
+                    
+                    return {
+                        "name": table_name,
+                        "sheet_name": sheet_title,
+                        "sheet_id": sheet_id,
+                        "start_row": row_idx + 1,
+                        "end_row": table_end,
+                        "start_column": "A",
+                        "end_column": chr(64 + max_cols),
+                        "range": f"'{sheet_title}'!A{row_idx + 1}:{chr(64 + max_cols)}{table_end}",
+                        "row_count": data_rows,
+                        "column_count": max_cols,
+                        "confidence": confidence,
+                        "detection_method": "first_table",
+                        "headers": trimmed_table_data[0] if trimmed_table_data else [],
+                        "sample_data": trimmed_table_data[1:min(4, len(trimmed_table_data))] if len(trimmed_table_data) > 1 else []
+                    }
     
-    if data_end_row < min_rows + 1 or data_end_col < min_columns:
-        return None
-    
-    # Extract the table data
-    table_data = []
-    for row_idx in range(data_end_row):
-        if row_idx < len(values):
-            row = values[row_idx][:data_end_col]
-            # Pad row if necessary
-            while len(row) < data_end_col:
-                row.append('')
-            table_data.append(row)
-    
-    # Calculate confidence based on data quality
-    confidence = _calculate_table_confidence(table_data)
-    
-    # Generate table name
-    table_name = _generate_table_name(table_data[0] if table_data else [], sheet_title)
-    
-    return {
-        "name": table_name,
-        "sheet_name": sheet_title,
-        "sheet_id": sheet_id,
-        "start_row": 1,
-        "end_row": data_end_row,
-        "start_column": "A",
-        "end_column": chr(64 + data_end_col),
-        "range": f"'{sheet_title}'!A1:{chr(64 + data_end_col)}{data_end_row}",
-        "row_count": data_end_row - 1,  # Exclude header
-        "column_count": data_end_col,
-        "confidence": confidence,
-        "detection_method": "main_table",
-        "headers": table_data[0] if table_data else [],
-        "sample_data": table_data[1:min(4, len(table_data))] if len(table_data) > 1 else []
-    }
+    return None
 
 
 def _find_smaller_tables(values: list, sheet_title: str, sheet_id: int, min_rows: int, min_columns: int) -> list:
@@ -3069,13 +3162,16 @@ def _find_smaller_tables(values: list, sheet_title: str, sheet_id: int, min_rows
     tables = []
     
     # Look for tables separated by empty rows
-    current_start = 0
+    current_start = None
     for row_idx in range(len(values)):
         # Check if this row is empty or mostly empty
-        is_empty = not any(cell.strip() for cell in values[row_idx] if cell)
+        is_empty = _is_empty_row(values[row_idx])
         
-        if is_empty and current_start < row_idx:
-            # Potential table end
+        if not is_empty and current_start is None:
+            # Found start of a potential table
+            current_start = row_idx
+        elif is_empty and current_start is not None:
+            # Found end of a potential table
             table_data = values[current_start:row_idx]
             if len(table_data) >= min_rows + 1 and any(len(row) >= min_columns for row in table_data):
                 # Additional check: ensure this looks like a real table, not just data rows
@@ -3083,10 +3179,10 @@ def _find_smaller_tables(values: list, sheet_title: str, sheet_id: int, min_rows
                     table = _create_table_from_data(table_data, sheet_title, sheet_id, current_start + 1, "empty_row_separation")
                     if table:
                         tables.append(table)
-            current_start = row_idx + 1
+            current_start = None
     
     # Check the last potential table
-    if current_start < len(values):
+    if current_start is not None:
         table_data = values[current_start:]
         if len(table_data) >= min_rows + 1 and any(len(row) >= min_columns for row in table_data):
             if _is_likely_real_table(table_data):
@@ -3095,6 +3191,19 @@ def _find_smaller_tables(values: list, sheet_title: str, sheet_id: int, min_rows
                     tables.append(table)
     
     return tables
+
+
+def _is_empty_row(row: list) -> bool:
+    """Check if a row is empty or mostly empty."""
+    if not row:
+        return True
+    
+    # Check if all cells are empty or just whitespace
+    for cell in row:
+        if cell and str(cell).strip():
+            return False
+    
+    return True
 
 
 def _is_likely_real_table(table_data: list) -> bool:
@@ -3849,12 +3958,18 @@ async def search_spreadsheets(query: str | None = None, max_results: int = 10, o
         final_query = " and ".join(query_parts)
         
         # Prepare the request
-        request = service.files().list(
-            q=final_query,
-            pageSize=max_results,
-            orderBy=order_by,
-            fields="nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, size, owners, shared, starred, trashed, parents, webViewLink, webContentLink)"
-        )
+        request_params = {
+            'q': final_query,
+            'pageSize': max_results,
+            'orderBy': order_by,
+            'fields': "nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, size, owners, shared, starred, trashed, parents, webViewLink, webContentLink)"
+        }
+        
+        # Add page token if provided (for pagination)
+        if hasattr(search_spreadsheets, 'page_token') and search_spreadsheets.page_token:
+            request_params['pageToken'] = search_spreadsheets.page_token
+        
+        request = service.files().list(**request_params)
         
         # Execute the search
         try:
@@ -3877,6 +3992,7 @@ async def search_spreadsheets(query: str | None = None, max_results: int = 10, o
             }
         
         files = response.get('files', [])
+        next_page_token = response.get('nextPageToken')
         
         # Debug: Log the response structure
         if not files:
@@ -3886,6 +4002,11 @@ async def search_spreadsheets(query: str | None = None, max_results: int = 10, o
                 "spreadsheets": [],
                 "total_results": 0,
                 "search_query": final_query,
+                "pagination": {
+                    "has_more": False,
+                    "next_page_token": None,
+                    "total_estimated": 0
+                },
                 "search_parameters": {
                     "query": query,
                     "max_results": max_results,
@@ -3970,12 +4091,20 @@ async def search_spreadsheets(query: str | None = None, max_results: int = 10, o
                 "error": str(e)
             }
         
+        # Build pagination info
+        pagination_info = {
+            "has_more": next_page_token is not None,
+            "next_page_token": next_page_token,
+            "total_estimated": len(spreadsheets) + (len(spreadsheets) if next_page_token else 0)  # Rough estimate
+        }
+        
         return {
             "successful": True,
-            "message": f"Found {len(spreadsheets)} spreadsheet(s) matching the search criteria",
+            "message": f"Found {len(spreadsheets)} spreadsheet(s) matching the search criteria (showing up to {max_results})",
             "spreadsheets": spreadsheets,
             "total_results": len(spreadsheets),
             "search_query": final_query,
+            "pagination": pagination_info,
             "search_parameters": {
                 "query": query,
                 "max_results": max_results,
@@ -5985,6 +6114,130 @@ async def update_spreadsheet_properties(spreadsheetId: str, properties: dict, fi
             "spreadsheetId": spreadsheetId,
             "error": str(e)
         }
+
+
+@simple_mcp.tool()
+async def demonstrate_pagination() -> dict:
+    """Demonstrate how to use pagination with the updated tools
+    
+    This tool shows you how to use the new pagination features in:
+    - list_sheets: Use page_token for Google Drive API pagination
+    - search_spreadsheets: Use page_token for Google Drive API pagination  
+    - get_sheet_names: Use start_index and max_sheets for manual pagination
+    - list_tables: Use start_index and max_tables for manual pagination
+    """
+    
+    return {
+        "successful": True,
+        "message": "Pagination Guide for Google Sheets MCP Tools",
+        "pagination_examples": {
+            "list_sheets": {
+                "description": "List Google Sheets with Google Drive API pagination",
+                "parameters": {
+                    "max_results": "Maximum sheets to return (1-1000, default: 50)",
+                    "page_token": "Token for next page (from previous response)"
+                },
+                "usage": [
+                    "1. Call list_sheets(max_results=10) to get first 10 sheets",
+                    "2. Check response.pagination.has_more for more results",
+                    "3. Use response.pagination.next_page_token for next page",
+                    "4. Call list_sheets(max_results=10, page_token=token) for next page"
+                ],
+                "response_structure": {
+                    "pagination": {
+                        "has_more": "Boolean indicating if more results exist",
+                        "next_page_token": "Token for next page (or null if no more)",
+                        "total_estimated": "Rough estimate of total results"
+                    },
+                    "summary": {
+                        "returned_count": "Number of results in this response",
+                        "max_results": "Maximum results requested"
+                    }
+                }
+            },
+            "search_spreadsheets": {
+                "description": "Search spreadsheets with Google Drive API pagination",
+                "parameters": {
+                    "max_results": "Maximum results to return (1-1000, default: 10)",
+                    "page_token": "Token for next page (from previous response)"
+                },
+                "usage": [
+                    "1. Call search_spreadsheets(query='name contains test', max_results=5)",
+                    "2. Check response.pagination.has_more for more results",
+                    "3. Use response.pagination.next_page_token for next page",
+                    "4. Call search_spreadsheets(..., page_token=token) for next page"
+                ],
+                "response_structure": {
+                    "pagination": {
+                        "has_more": "Boolean indicating if more results exist",
+                        "next_page_token": "Token for next page (or null if no more)",
+                        "total_estimated": "Rough estimate of total results"
+                    }
+                }
+            },
+            "get_sheet_names": {
+                "description": "Get worksheet names with manual pagination",
+                "parameters": {
+                    "max_sheets": "Maximum sheets to return (1-1000, default: 100)",
+                    "start_index": "Starting index for pagination (0-based, default: 0)"
+                },
+                "usage": [
+                    "1. Call get_sheet_names(spreadsheet_id, max_sheets=10) for first 10",
+                    "2. Check response.pagination.has_more for more results",
+                    "3. Use response.pagination.next_start_index for next page",
+                    "4. Call get_sheet_names(..., start_index=10) for next page"
+                ],
+                "response_structure": {
+                    "pagination": {
+                        "has_more": "Boolean indicating if more results exist",
+                        "next_start_index": "Starting index for next page (or null if no more)",
+                        "total_sheets": "Total number of sheets in spreadsheet",
+                        "returned_count": "Number of results in this response",
+                        "start_index": "Starting index used for this request",
+                        "end_index": "Ending index of results (0-based)"
+                    }
+                }
+            },
+            "list_tables": {
+                "description": "List tables with manual pagination",
+                "parameters": {
+                    "max_tables": "Maximum tables to return (1-1000, default: 50)",
+                    "start_index": "Starting index for pagination (0-based, default: 0)"
+                },
+                "usage": [
+                    "1. Call list_tables(spreadsheet_id, max_tables=10) for first 10 tables",
+                    "2. Check response.pagination.has_more for more results",
+                    "3. Use response.pagination.next_start_index for next page",
+                    "4. Call list_tables(..., start_index=10) for next page"
+                ],
+                "response_structure": {
+                    "pagination": {
+                        "has_more": "Boolean indicating if more results exist",
+                        "next_start_index": "Starting index for next page (or null if no more)",
+                        "total_tables": "Total number of tables found",
+                        "returned_count": "Number of results in this response",
+                        "start_index": "Starting index used for this request",
+                        "end_index": "Ending index of results (0-based)"
+                    }
+                }
+            }
+        },
+        "best_practices": [
+            "Use smaller max_results values (10-50) for better performance",
+            "Always check pagination.has_more before requesting next page",
+            "For Google Drive API tools (list_sheets, search_spreadsheets): use page_token",
+            "For manual pagination tools (get_sheet_names, list_tables): use start_index",
+            "Store pagination tokens/indexes if you need to resume later",
+            "Consider caching results for frequently accessed data"
+        ],
+        "example_workflow": [
+            "1. Start with small max_results (e.g., 10-20)",
+            "2. Process the current page of results",
+            "3. Check if more results exist (pagination.has_more)",
+            "4. If yes, use the next page token/index to get more results",
+            "5. Repeat until all results are processed"
+        ]
+    }
 
 
 if __name__ == "__main__":

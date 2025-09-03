@@ -8,6 +8,7 @@ A Model Context Protocol (MCP) server that provides tools for interacting with G
 - **Google Sheets**: Create, read, update, and delete spreadsheets and worksheets
 - **Data Operations**: Batch operations and data filtering
 - **Formatting**: Cell formatting, charts, and conditional formatting
+- **Pagination**: Smart pagination for large datasets with max limits and smooth navigation
 
 ## Prerequisites
 
@@ -75,7 +76,7 @@ gsheets-mcp/
 ## Available Tools
 
 ### Spreadsheet Management
-- `list_sheets` - List all Google Sheets in your Drive
+- `list_sheets` - List Google Sheets in your Drive with pagination support
 - `create_google_sheet` - Create a new Google Sheet
 - `delete_spreadsheet` - Delete a Google Sheet
 - `get_spreadsheet_info` - Get spreadsheet metadata
@@ -83,7 +84,7 @@ gsheets-mcp/
 ### Worksheet Management
 - `add_worksheet` - Add a new worksheet to a spreadsheet
 - `delete_sheet` - Delete a worksheet from a spreadsheet
-- `get_sheet_names` - Get all worksheet names
+- `get_sheet_names` - Get worksheet names with pagination support
 - `find_worksheet_by_title` - Find worksheet by exact title
 - `copy_sheet_to_another_spreadsheet` - Copy sheet between spreadsheets
 
@@ -101,7 +102,7 @@ gsheets-mcp/
 - `batch_clear_values_by_data_filter` - Clear values by data filter
 
 ### Table Operations
-- `list_tables` - List all tables in a spreadsheet
+- `list_tables` - List tables in a spreadsheet with pagination support
 - `get_table_schema` - Get table structure and schema
 - `create_sheet_from_json` - Create sheet from JSON data
 
@@ -128,7 +129,27 @@ gsheets-mcp/
 - `update_spreadsheet_properties` - Update spreadsheet properties
 
 ### Drive Operations
-- `search_spreadsheets` - Search for spreadsheets in Drive
+- `search_spreadsheets` - Search for spreadsheets in Drive with pagination support
+
+## Pagination Features
+
+The server now includes smart pagination for tools that return large datasets:
+
+### **Google Drive API Pagination**
+- **`list_sheets`**: Use `max_results` and `page_token` for seamless pagination
+- **`search_spreadsheets`**: Use `max_results` and `page_token` for search results
+
+### **Manual Pagination**
+- **`get_sheet_names`**: Use `max_sheets` and `start_index` for worksheet names
+- **`list_tables`**: Use `max_tables` and `start_index` for table listings
+
+### **Benefits**
+- **Faster Response Times**: Smaller chunks load faster
+- **Better Memory Management**: Avoid overwhelming memory with large datasets
+- **Smooth User Experience**: Progressive loading for better UX
+- **Scalable Operations**: Handle thousands of items efficiently
+
+For detailed pagination usage, see `PAGINATION_GUIDE.md`.
 
 ## Development
 
