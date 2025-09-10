@@ -25,73 +25,83 @@ SCOPES = [
     "https://www.googleapis.com/auth/documents",
 ]
 
-# Get paths from environment variables (set by MCP client)
-CREDENTIALS_PATH = os.getenv('GSHEETS_CREDENTIALS_PATH')
-TOKEN_PATH = os.getenv('GSHEETS_TOKEN_PATH')
-
 # Initialize credential variables
 CLIENT_ID = None
 CLIENT_SECRET = None
 REDIRECT_URI = None
 CREDENTIALS_FILE = None
 TOKEN_FILE = None
+creds = None
 
 # For MCP server mode, suppress all credential errors to avoid breaking the protocol
 # Only show errors when running standalone
 SHOW_CREDENTIAL_ERRORS = False  # Always suppress for MCP compatibility
 
-# Validate that environment variables are set
-if not CREDENTIALS_PATH:
-    if SHOW_CREDENTIAL_ERRORS:
-        sys.stderr.write("Error: GSHEETS_CREDENTIALS_PATH environment variable not set\n")
-        sys.stderr.write("This should be set by your MCP client configuration\n")
-else:
-    CREDENTIALS_FILE = Path(CREDENTIALS_PATH)
+def load_credentials():
+    """Load credentials from environment variables"""
+    global CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, CREDENTIALS_FILE, TOKEN_FILE, creds
     
-    if not CREDENTIALS_FILE.exists():
-        if SHOW_CREDENTIAL_ERRORS:
-            sys.stderr.write(f"Error: Credentials file not found at {CREDENTIALS_PATH}\n")
-            sys.stderr.write("Please ensure your MCP client configuration sets GSHEETS_CREDENTIALS_PATH correctly\n")
-            sys.stderr.write("and the credentials.json file exists at the specified path\n")
-    else:
-        try:
-            with open(CREDENTIALS_FILE, 'r') as f:
-                client_config = json.load(f)
-            
-            CLIENT_ID = client_config['installed']['client_id']
-            CLIENT_SECRET = client_config['installed']['client_secret']
-            REDIRECT_URI = client_config['installed']['redirect_uris'][0]
-        except Exception as e:
-            if SHOW_CREDENTIAL_ERRORS:
-                sys.stderr.write(f"Error loading credentials from {CREDENTIALS_PATH}: {e}\n")
-
-# Set up token file path
-if not TOKEN_PATH:
-    if SHOW_CREDENTIAL_ERRORS:
-        sys.stderr.write("Error: GSHEETS_TOKEN_PATH environment variable not set\n")
-        sys.stderr.write("This should be set by your MCP client configuration\n")
-else:
-    TOKEN_FILE = Path(TOKEN_PATH)
+    # Get fresh environment variables (in case they were updated)
+    current_creds_path = os.getenv('GSHEETS_CREDENTIALS_PATH')
+    current_token_path = os.getenv('GSHEETS_TOKEN_PATH')
     
-    if not TOKEN_FILE.exists():
-        if SHOW_CREDENTIAL_ERRORS:
-            sys.stderr.write(f"Token file not found at {TOKEN_PATH}\n")
-            sys.stderr.write("Please set GSHEETS_TOKEN_PATH environment variable and authenticate.\n")
-    else:
-        try:
-            token_data = json.loads(TOKEN_FILE.read_text())
-            creds = Credentials.from_authorized_user_info(token_data, SCOPES)
-        except Exception as e:
-            if SHOW_CREDENTIAL_ERRORS:
-                sys.stderr.write(f"Error loading token from {TOKEN_PATH}: {e}\n")
-                sys.stderr.write("Token file may be corrupted. Please re-authenticate.\n")
 
-# Initialize creds if not set
-if 'creds' not in locals():
-    creds = None
+    
+    # Load credentials if path is available
+    if current_creds_path:
+        CREDENTIALS_FILE = Path(current_creds_path)
+
+        
+        if CREDENTIALS_FILE.exists():
+            try:
+                with open(CREDENTIALS_FILE, 'r') as f:
+                    client_config = json.load(f)
+                
+                # Handle both 'installed' and 'web' credential types
+                if 'installed' in client_config:
+                    cred_section = client_config['installed']
+                elif 'web' in client_config:
+                    cred_section = client_config['web']
+                else:
+                    raise ValueError("Credentials file must contain either 'installed' or 'web' section")
+                
+                CLIENT_ID = cred_section['client_id']
+                CLIENT_SECRET = cred_section['client_secret']
+                # For web credentials, use the first redirect URI
+                REDIRECT_URI = cred_section['redirect_uris'][0]
+
+            except Exception as e:
+
+                if SHOW_CREDENTIAL_ERRORS:
+                    sys.stderr.write(f"Error loading credentials from {current_creds_path}: {e}\n")
+                CLIENT_ID = None
+                CLIENT_SECRET = None
+                REDIRECT_URI = None
+        else:
+            # Reset credentials if file doesn't exist
+            CLIENT_ID = None
+            CLIENT_SECRET = None
+            REDIRECT_URI = None
+
+    # Load token if path is available
+    if current_token_path:
+        TOKEN_FILE = Path(current_token_path)
+        
+        if TOKEN_FILE.exists():
+            try:
+                token_data = json.loads(TOKEN_FILE.read_text())
+                creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+            except Exception as e:
+                if SHOW_CREDENTIAL_ERRORS:
+                    sys.stderr.write(f"Error loading token from {current_token_path}: {e}\n")
+                    sys.stderr.write("Token file may be corrupted. Please re-authenticate.\n")
+                creds = None
+        else:
+            creds = None
 
 
-# Authentication tools removed - credentials now managed via environment variables
+# Load credentials immediately at startup (like Gmail MCP server does)
+load_credentials()
 
 def get_auth_error_response():
     """Return a standardized authentication error response"""
@@ -109,7 +119,11 @@ def get_auth_error_response():
 
 def check_credentials():
     """Check if credentials are available and valid"""
-    global creds
+    global creds, CLIENT_ID, CLIENT_SECRET, REDIRECT_URI
+    
+    # Try to reload credentials from environment variables if not already loaded
+    if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
+        load_credentials()
     
     # Check if credentials are available
     if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
@@ -129,10 +143,6 @@ def check_credentials():
     return True, None
 
 
-class GoogleSheet:
-    title: str
-
-
 @simple_mcp.tool()
 async def list_sheets(max_results: int = 50, page_token: str | None = None) -> dict:
     """List Google Sheets in your Google Drive with pagination support
@@ -141,33 +151,16 @@ async def list_sheets(max_results: int = 50, page_token: str | None = None) -> d
         max_results: Maximum number of sheets to return (1-1000). Defaults to 50.
         page_token: Token for the next page of results. Use this for pagination.
     """
-    global creds
 
-    # Check if credentials are available
-    if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
         return {
             "successful": False,
-            "message": "Google Sheets credentials not configured. Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables.",
-            "error": "Missing credentials configuration"
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
         }
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                return {
-                    "successful": False,
-                    "message": f"Failed to refresh authentication token: {str(e)}",
-                    "error": "Token refresh failed"
-                }
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "error": "Authentication required"
-            }
     
     # Validate max_results parameter
     if max_results < 1 or max_results > 1000:
@@ -295,7 +288,7 @@ async def list_sheets(max_results: int = 50, page_token: str | None = None) -> d
 
 
 @simple_mcp.tool()
-async def add_worksheet(spreadsheet_id: str, title: str, row_count: int = 1000, column_count: int = 26) -> str:
+async def add_worksheet(spreadsheet_id: str, title: str, row_count: int = 1000, column_count: int = 26) -> dict:
     """Add a new worksheet (tab) to an existing Google Sheet
     
     Args:
@@ -304,14 +297,16 @@ async def add_worksheet(spreadsheet_id: str, title: str, row_count: int = 1000, 
         row_count: Number of rows in the new worksheet (default: 1000)
         column_count: Number of columns in the new worksheet (default: 26)
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     try:
         # Build the Sheets service
@@ -356,7 +351,7 @@ async def add_worksheet(spreadsheet_id: str, title: str, row_count: int = 1000, 
 
 
 @simple_mcp.tool()
-async def append_dimension(spreadsheet_id: str, sheet_id: int, dimension: str, length: int) -> str:
+async def append_dimension(spreadsheet_id: str, sheet_id: int, dimension: str, length: int) -> dict:
     """Append new rows or columns to a sheet, increasing its size
     
     Args:
@@ -423,7 +418,7 @@ async def append_dimension(spreadsheet_id: str, sheet_id: int, dimension: str, l
 
 
 @simple_mcp.tool()
-async def get_cell_data(spreadsheet_id: str, ranges: list[str]) -> str:
+async def get_cell_data(spreadsheet_id: str, ranges: list[str]) -> dict:
     """Retrieve data from specified cell ranges in a Google Spreadsheet
     
     Args:
@@ -451,7 +446,11 @@ async def get_cell_data(spreadsheet_id: str, ranges: list[str]) -> str:
         try:
             spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         except Exception as e:
-            return f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}",
+                "error": str(e)
+            }
         
         # Check if spreadsheet has at least one worksheet
         if 'sheets' not in spreadsheet or len(spreadsheet['sheets']) == 0:
@@ -517,7 +516,7 @@ async def get_cell_data(spreadsheet_id: str, ranges: list[str]) -> str:
 
 
 @simple_mcp.tool()
-async def update_sheet_data(spreadsheet_id: str, values: list[list], sheet_name: str | None = None, first_cell_location: str | None = None) -> str:
+async def update_sheet_data(spreadsheet_id: str, values: list[list], sheet_name: str | None = None, first_cell_location: str | None = None) -> dict:
     """Update a specified range in a Google Sheet with given values, or append them as new rows if first_cell_location is omitted
     
     Args:
@@ -642,7 +641,7 @@ async def update_sheet_data(spreadsheet_id: str, values: list[list], sheet_name:
 
 
 @simple_mcp.tool()
-async def batch_update_by_filter(spreadsheet_id: str, sheet_name: str, filter_column: str, filter_value: str, update_column: str, new_value: str) -> str:
+async def batch_update_by_filter(spreadsheet_id: str, sheet_name: str, filter_column: str, filter_value: str, update_column: str, new_value: str) -> dict:
     """Tool to update values in ranges matching data filters. Use when you need to update specific data in a Google Sheet based on criteria rather than fixed cell ranges.
     
     Args:
@@ -653,14 +652,16 @@ async def batch_update_by_filter(spreadsheet_id: str, sheet_name: str, filter_co
         update_column: Column letter (e.g., 'C', 'D') or column name to update
         new_value: New value to set in the update column for matching rows
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     try:
         # Build the Sheets service
@@ -670,11 +671,23 @@ async def batch_update_by_filter(spreadsheet_id: str, sheet_name: str, filter_co
         try:
             spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         except Exception as e:
-            return f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}",
+                "error": str(e),
+                "updated_rows": 0,
+                "matching_rows": []
+            }
         
         # Check if spreadsheet has at least one worksheet
         if 'sheets' not in spreadsheet or len(spreadsheet['sheets']) == 0:
-            return "Error: Spreadsheet has no worksheets"
+            return {
+                "successful": False,
+                "message": "Error: Spreadsheet has no worksheets",
+                "error": "No worksheets found",
+                "updated_rows": 0,
+                "matching_rows": []
+            }
         
         # Find the specified sheet
         target_sheet = None
@@ -685,7 +698,14 @@ async def batch_update_by_filter(spreadsheet_id: str, sheet_name: str, filter_co
         
         if not target_sheet:
             available_sheets = [sheet['properties']['title'] for sheet in spreadsheet['sheets']]
-            return f"Error: Sheet '{sheet_name}' not found. Available sheets: {', '.join(available_sheets)}"
+            return {
+                "successful": False,
+                "message": f"Error: Sheet '{sheet_name}' not found. Available sheets: {', '.join(available_sheets)}",
+                "error": "Sheet not found",
+                "available_sheets": available_sheets,
+                "updated_rows": 0,
+                "matching_rows": []
+            }
         
         # Get all data from the sheet
         try:
@@ -694,11 +714,23 @@ async def batch_update_by_filter(spreadsheet_id: str, sheet_name: str, filter_co
                 range=f"{sheet_name}!A:Z"  # Get data from A to Z columns
             ).execute()
         except Exception as e:
-            return f"Error: Could not retrieve data from sheet. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not retrieve data from sheet. Details: {str(e)}",
+                "error": str(e),
+                "updated_rows": 0,
+                "matching_rows": []
+            }
         
         values = data_response.get('values', [])
         if not values:
-            return "Error: Sheet is empty"
+            return {
+                "successful": False,
+                "message": "Error: Sheet is empty",
+                "error": "No data found",
+                "updated_rows": 0,
+                "matching_rows": []
+            }
         
         # Find header row and column indices
         headers = values[0]
@@ -722,10 +754,24 @@ async def batch_update_by_filter(spreadsheet_id: str, sheet_name: str, filter_co
         update_col_idx = column_to_index(update_column)
         
         if filter_col_idx is None:
-            return f"Error: Filter column '{filter_column}' not found. Available columns: {', '.join(headers)}"
+            return {
+                "successful": False,
+                "message": f"Error: Filter column '{filter_column}' not found. Available columns: {', '.join(headers)}",
+                "error": "Filter column not found",
+                "available_columns": headers,
+                "updated_rows": 0,
+                "matching_rows": []
+            }
         
         if update_col_idx is None:
-            return f"Error: Update column '{update_column}' not found. Available columns: {', '.join(headers)}"
+            return {
+                "successful": False,
+                "message": f"Error: Update column '{update_column}' not found. Available columns: {', '.join(headers)}",
+                "error": "Update column not found",
+                "available_columns": headers,
+                "updated_rows": 0,
+                "matching_rows": []
+            }
         
         # Find rows that match the filter criteria
         matching_rows = []
@@ -734,7 +780,15 @@ async def batch_update_by_filter(spreadsheet_id: str, sheet_name: str, filter_co
                 matching_rows.append(row_idx)
         
         if not matching_rows:
-            return f"No rows found where column '{filter_column}' equals '{filter_value}'"
+            return {
+                "successful": False,
+                "message": f"No rows found where column '{filter_column}' equals '{filter_value}'",
+                "error": "No matching rows",
+                "filter_column": filter_column,
+                "filter_value": filter_value,
+                "updated_rows": 0,
+                "matching_rows": []
+            }
         
         # Prepare batch update requests
         requests = []
@@ -774,28 +828,45 @@ async def batch_update_by_filter(spreadsheet_id: str, sheet_name: str, filter_co
             body=batch_body
         ).execute()
         
-        return f"Successfully updated {len(matching_rows)} rows where column '{filter_column}' equals '{filter_value}'. Updated column '{update_column}' with value '{new_value}'."
+        return {
+            "successful": True,
+            "message": f"Successfully updated {len(matching_rows)} rows where column '{filter_column}' equals '{filter_value}'. Updated column '{update_column}' with value '{new_value}'.",
+            "updated_rows": len(matching_rows),
+            "matching_rows": matching_rows,
+            "filter_column": filter_column,
+            "filter_value": filter_value,
+            "update_column": update_column,
+            "new_value": new_value
+        }
         
     except Exception as e:
-        return f"Error updating values by filter: {str(e)}"
+        return {
+            "successful": False,
+            "message": f"Error updating values by filter: {str(e)}",
+            "error": str(e),
+            "updated_rows": 0,
+            "matching_rows": []
+        }
 
 
 @simple_mcp.tool()
-async def clear_basic_filter(spreadsheet_id: str, sheet_name: str) -> str:
+async def clear_basic_filter(spreadsheet_id: str, sheet_name: str) -> dict:
     """Tool to clear the basic filter from a sheet. Use when you need to remove an existing basic filter from a specific sheet within a Google spreadsheet.
     
     Args:
         spreadsheet_id: The ID of the Google Sheet (found in the URL)
         sheet_name: Name of the specific sheet to clear the filter from
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     try:
         # Build the Sheets service
@@ -805,11 +876,21 @@ async def clear_basic_filter(spreadsheet_id: str, sheet_name: str) -> str:
         try:
             spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         except Exception as e:
-            return f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}",
+                "error": str(e),
+                "sheet_name": sheet_name
+            }
         
         # Check if spreadsheet has at least one worksheet
         if 'sheets' not in spreadsheet or len(spreadsheet['sheets']) == 0:
-            return "Error: Spreadsheet has no worksheets"
+            return {
+                "successful": False,
+                "message": "Error: Spreadsheet has no worksheets",
+                "error": "No worksheets found",
+                "sheet_name": sheet_name
+            }
         
         # Find the specified sheet
         target_sheet = None
@@ -820,7 +901,13 @@ async def clear_basic_filter(spreadsheet_id: str, sheet_name: str) -> str:
         
         if not target_sheet:
             available_sheets = [sheet['properties']['title'] for sheet in spreadsheet['sheets']]
-            return f"Error: Sheet '{sheet_name}' not found. Available sheets: {', '.join(available_sheets)}"
+            return {
+                "successful": False,
+                "message": f"Error: Sheet '{sheet_name}' not found. Available sheets: {', '.join(available_sheets)}",
+                "error": "Sheet not found",
+                "available_sheets": available_sheets,
+                "sheet_name": sheet_name
+            }
         
         # Get the sheet ID
         sheet_id = target_sheet['properties']['sheetId']
@@ -838,38 +925,66 @@ async def clear_basic_filter(spreadsheet_id: str, sheet_name: str) -> str:
                 }
             ).execute()
             
-            return f"Successfully cleared basic filter from sheet '{sheet_name}'"
+            return {
+                "successful": True,
+                "message": f"Successfully cleared basic filter from sheet '{sheet_name}'",
+                "sheet_name": sheet_name,
+                "sheet_id": sheet_id
+            }
             
         except Exception as e:
             # Check if the error is because there's no filter to clear
             if "no filter" in str(e).lower() or "filter not found" in str(e).lower():
-                return f"No basic filter found on sheet '{sheet_name}' to clear"
+                return {
+                    "successful": False,
+                    "message": f"No basic filter found on sheet '{sheet_name}' to clear",
+                    "error": "No filter to clear",
+                    "sheet_name": sheet_name,
+                    "sheet_id": sheet_id
+                }
             else:
-                return f"Error clearing basic filter: {str(e)}"
+                return {
+                    "successful": False,
+                    "message": f"Error clearing basic filter: {str(e)}",
+                    "error": str(e),
+                    "sheet_name": sheet_name,
+                    "sheet_id": sheet_id
+                }
         
     except Exception as e:
-        return f"Error clearing basic filter: {str(e)}"
+        return {
+            "successful": False,
+            "message": f"Error clearing basic filter: {str(e)}",
+            "error": str(e),
+            "sheet_name": sheet_name
+        }
 
 
 @simple_mcp.tool()
-async def clear_spreadsheet_values(spreadsheet_id: str, range: str) -> str:
+async def clear_spreadsheet_values(spreadsheet_id: str, range: str) -> dict:
     """Clears cell content (preserving formatting and notes) from a specified A1 notation range in a Google spreadsheet. The range must correspond to an existing sheet and cells.
     
     Args:
         spreadsheet_id: The ID of the Google Sheet (found in the URL)
         range: A1 notation range to clear (e.g., 'Sheet1!A1:B5', 'A1:C10', 'B2:D8')
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     if not range:
-        return "Error: Range must be specified"
+        return {
+            "successful": False,
+            "message": "Error: Range must be specified",
+            "error": "Missing range parameter"
+        }
     
     try:
         # Build the Sheets service
@@ -879,7 +994,11 @@ async def clear_spreadsheet_values(spreadsheet_id: str, range: str) -> str:
         try:
             spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         except Exception as e:
-            return f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}",
+                "error": str(e)
+            }
         
         # Check if spreadsheet has at least one worksheet
         if 'sheets' not in spreadsheet or len(spreadsheet['sheets']) == 0:
@@ -909,7 +1028,12 @@ async def clear_spreadsheet_values(spreadsheet_id: str, range: str) -> str:
         
         if not target_sheet:
             available_sheets = [sheet['properties']['title'] for sheet in spreadsheet['sheets']]
-            return f"Error: Sheet '{sheet_name}' not found. Available sheets: {', '.join(available_sheets)}"
+            return {
+                "successful": False,
+                "message": f"Error: Sheet '{sheet_name}' not found. Available sheets: {', '.join(available_sheets)}",
+                "error": "Sheet not found",
+                "available_sheets": available_sheets
+            }
         
         # Construct the clean range for the API call
         clean_range = f"{sheet_name}!{cell_range}"
@@ -925,17 +1049,30 @@ async def clear_spreadsheet_values(spreadsheet_id: str, range: str) -> str:
             # Get the cleared range info
             cleared_range = response.get('clearedRange', clean_range)
             
-            return f"Successfully cleared values from range '{cleared_range}'. Formatting and notes have been preserved."
+            return {
+                "successful": True,
+                "message": f"Successfully cleared values from range '{cleared_range}'. Formatting and notes have been preserved.",
+                "cleared_range": cleared_range
+            }
             
         except Exception as e:
-            return f"Error clearing values from range '{clean_range}': {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error clearing values from range '{clean_range}': {str(e)}",
+                "error": str(e),
+                "range": clean_range
+            }
         
     except Exception as e:
-        return f"Error clearing spreadsheet values: {str(e)}"
+        return {
+            "successful": False,
+            "message": f"Error clearing spreadsheet values: {str(e)}",
+            "error": str(e)
+        }
 
 
 @simple_mcp.tool()
-async def create_chart(spreadsheet_id: str, sheet_name: str, chart_title: str, data_range: str, chart_type: str = "COLUMN", position: str = "A1") -> str:
+async def create_chart(spreadsheet_id: str, sheet_name: str, chart_title: str, data_range: str, chart_type: str = "COLUMN", position: str = "A1") -> dict:
     """Create a chart in a Google Sheets spreadsheet using the specified data range and chart type.
     
     Args:
@@ -947,22 +1084,33 @@ async def create_chart(spreadsheet_id: str, sheet_name: str, chart_title: str, d
                   Options: 'COLUMN', 'LINE', 'PIE', 'BAR', 'AREA', 'SCATTER', 'HISTOGRAM'
         position: A1 notation position where to place the chart (default: 'A1')
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     if not chart_title or not data_range:
-        return "Error: Chart title and data range must be specified"
+        return {
+            "successful": False,
+            "message": "Error: Chart title and data range must be specified",
+            "error": "Missing required parameters"
+        }
     
     # Validate chart type
     valid_chart_types = ['COLUMN', 'LINE', 'PIE', 'BAR', 'AREA', 'SCATTER', 'HISTOGRAM']
     if chart_type.upper() not in valid_chart_types:
-        return f"Error: Invalid chart type '{chart_type}'. Valid types: {', '.join(valid_chart_types)}"
+        return {
+            "successful": False,
+            "message": f"Error: Invalid chart type '{chart_type}'. Valid types: {', '.join(valid_chart_types)}",
+            "error": "Invalid chart type",
+            "valid_types": valid_chart_types
+        }
     
     try:
         # Build the Sheets service
@@ -972,7 +1120,11 @@ async def create_chart(spreadsheet_id: str, sheet_name: str, chart_title: str, d
         try:
             spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         except Exception as e:
-            return f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}",
+                "error": str(e)
+            }
         
         # Check if spreadsheet has at least one worksheet
         if 'sheets' not in spreadsheet or len(spreadsheet['sheets']) == 0:
@@ -987,7 +1139,12 @@ async def create_chart(spreadsheet_id: str, sheet_name: str, chart_title: str, d
         
         if not target_sheet:
             available_sheets = [sheet['properties']['title'] for sheet in spreadsheet['sheets']]
-            return f"Error: Sheet '{sheet_name}' not found. Available sheets: {', '.join(available_sheets)}"
+            return {
+                "successful": False,
+                "message": f"Error: Sheet '{sheet_name}' not found. Available sheets: {', '.join(available_sheets)}",
+                "error": "Sheet not found",
+                "available_sheets": available_sheets
+            }
         
         # Get the sheet ID
         sheet_id = target_sheet['properties']['sheetId']
@@ -1203,30 +1360,48 @@ async def create_chart(spreadsheet_id: str, sheet_name: str, chart_title: str, d
         # Get the created chart ID
         chart_id = response['replies'][0]['addChart']['chart']['chartId']
         
-        return f"Successfully created {chart_type.lower()} chart '{chart_title}' in sheet '{sheet_name}' at position {position}. Chart ID: {chart_id}"
+        return {
+            "successful": True,
+            "message": f"Successfully created {chart_type.lower()} chart '{chart_title}' in sheet '{sheet_name}' at position {position}. Chart ID: {chart_id}",
+            "chart_id": chart_id,
+            "chart_title": chart_title,
+            "sheet_name": sheet_name,
+            "chart_type": chart_type,
+            "position": position
+        }
         
     except Exception as e:
-        return f"Error creating chart: {str(e)}"
+        return {
+            "successful": False,
+            "message": f"Error creating chart: {str(e)}",
+            "error": str(e)
+        }
 
 
 @simple_mcp.tool()
-async def create_google_sheet(title: str) -> str:
+async def create_google_sheet(title: str) -> dict:
     """Creates a new Google Spreadsheet in Google Drive using the provided title.
     
     Args:
         title: The title for the new Google Sheet. This will be the name of the file in Google Drive.
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     if not title:
-        return "Error: Sheet title must be specified"
+        return {
+            "successful": False,
+            "message": "Error: Sheet title must be specified",
+            "error": "Missing title parameter"
+        }
     
     try:
         # Build the Drive service
@@ -1248,14 +1423,29 @@ async def create_google_sheet(title: str) -> str:
         file_name = file.get('name')
         web_link = file.get('webViewLink')
         
-        return f"Successfully created Google Sheet '{file_name}' with ID: {file_id}\nView it at: {web_link}"
+        return {
+            "successful": True,
+            "message": f"Successfully created Google Sheet '{file_name}' with ID: {file_id}",
+            "spreadsheet_id": file_id,
+            "title": file_name,
+            "web_view_link": web_link,
+            "file_id": file_id
+        }
         
     except Exception as e:
-        return f"Error creating Google Sheet: {str(e)}"
+        return {
+            "successful": False,
+            "message": f"Error creating Google Sheet: {str(e)}",
+            "error": str(e),
+            "spreadsheet_id": None,
+            "title": None,
+            "web_view_link": None,
+            "file_id": None
+        }
 
 
 @simple_mcp.tool()
-async def create_spreadsheet_column(spreadsheet_id: str, sheet_id: int, insert_index: int = None) -> str:
+async def create_spreadsheet_column(spreadsheet_id: str, sheet_id: int, insert_index: int = None) -> dict:
     """Creates a new column in a Google Spreadsheet, requiring a valid spreadsheet ID and an existing sheet ID. An out-of-bounds insert index may append/prepend the column.
     
     Args:
@@ -1264,17 +1454,23 @@ async def create_spreadsheet_column(spreadsheet_id: str, sheet_id: int, insert_i
         insert_index: The column index where to insert the new column (0-based). 
                      If None, appends to the end. If out-of-bounds, appends/prepends accordingly.
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     if not spreadsheet_id:
-        return "Error: Spreadsheet ID must be specified"
+        return {
+            "successful": False,
+            "message": "Error: Spreadsheet ID must be specified",
+            "error": "Missing spreadsheet ID"
+        }
     
     try:
         # Build the Sheets service
@@ -1284,7 +1480,11 @@ async def create_spreadsheet_column(spreadsheet_id: str, sheet_id: int, insert_i
         try:
             spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         except Exception as e:
-            return f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}",
+                "error": str(e)
+            }
         
         # Check if spreadsheet has at least one worksheet
         if 'sheets' not in spreadsheet or len(spreadsheet['sheets']) == 0:
@@ -1299,7 +1499,13 @@ async def create_spreadsheet_column(spreadsheet_id: str, sheet_id: int, insert_i
         
         if not target_sheet:
             available_sheets = [f"{sheet['properties']['title']} (ID: {sheet['properties']['sheetId']})" for sheet in spreadsheet['sheets']]
-            return f"Error: Sheet with ID {sheet_id} not found. Available sheets: {', '.join(available_sheets)}"
+            return {
+                "successful": False,
+                "message": f"Error: Sheet with ID {sheet_id} not found. Available sheets: {', '.join(available_sheets)}",
+                "error": "Sheet not found",
+                "sheet_id": sheet_id,
+                "available_sheets": available_sheets
+            }
         
         # Get current sheet dimensions
         current_col_count = target_sheet['properties']['gridProperties']['columnCount']
@@ -1339,14 +1545,24 @@ async def create_spreadsheet_column(spreadsheet_id: str, sheet_id: int, insert_i
         # Get the new column position
         new_col_letter = chr(ord('A') + insert_index)
         
-        return f"Successfully created new column at position {new_col_letter} (index {insert_index}) in sheet '{target_sheet['properties']['title']}'"
+        return {
+            "successful": True,
+            "message": f"Successfully created new column at position {new_col_letter} (index {insert_index}) in sheet '{target_sheet['properties']['title']}'",
+            "column_position": new_col_letter,
+            "column_index": insert_index,
+            "sheet_name": target_sheet['properties']['title']
+        }
         
     except Exception as e:
-        return f"Error creating spreadsheet column: {str(e)}"
+        return {
+            "successful": False,
+            "message": f"Error creating spreadsheet column: {str(e)}",
+            "error": str(e)
+        }
 
 
 @simple_mcp.tool()
-async def create_spreadsheet_row(spreadsheet_id: str, sheet_id: int, insert_index: int = None, inherit_formatting: bool = True) -> str:
+async def create_spreadsheet_row(spreadsheet_id: str, sheet_id: int, insert_index: int = None, inherit_formatting: bool = True) -> dict:
     """Inserts a new, empty row into a specified sheet of a Google spreadsheet at a given index, optionally inheriting formatting from the row above.
     
     Args:
@@ -1356,17 +1572,23 @@ async def create_spreadsheet_row(spreadsheet_id: str, sheet_id: int, insert_inde
                      If None, appends to the end. If out-of-bounds, appends/prepends accordingly.
         inherit_formatting: Whether to inherit formatting from the row above (default: True)
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     if not spreadsheet_id:
-        return "Error: Spreadsheet ID must be specified"
+        return {
+            "successful": False,
+            "message": "Error: Spreadsheet ID must be specified",
+            "error": "Missing spreadsheet ID"
+        }
     
     try:
         # Build the Sheets service
@@ -1376,7 +1598,11 @@ async def create_spreadsheet_row(spreadsheet_id: str, sheet_id: int, insert_inde
         try:
             spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         except Exception as e:
-            return f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}",
+                "error": str(e)
+            }
         
         # Check if spreadsheet has at least one worksheet
         if 'sheets' not in spreadsheet or len(spreadsheet['sheets']) == 0:
@@ -1391,7 +1617,13 @@ async def create_spreadsheet_row(spreadsheet_id: str, sheet_id: int, insert_inde
         
         if not target_sheet:
             available_sheets = [f"{sheet['properties']['title']} (ID: {sheet['properties']['sheetId']})" for sheet in spreadsheet['sheets']]
-            return f"Error: Sheet with ID {sheet_id} not found. Available sheets: {', '.join(available_sheets)}"
+            return {
+                "successful": False,
+                "message": f"Error: Sheet with ID {sheet_id} not found. Available sheets: {', '.join(available_sheets)}",
+                "error": "Sheet not found",
+                "sheet_id": sheet_id,
+                "available_sheets": available_sheets
+            }
         
         # Get current sheet dimensions
         current_row_count = target_sheet['properties']['gridProperties']['rowCount']
@@ -1446,14 +1678,25 @@ async def create_spreadsheet_row(spreadsheet_id: str, sheet_id: int, insert_inde
         else:
             formatting_source = "default"
         
-        return f"Successfully created new row at position {new_row_number} (index {insert_index}) in sheet '{target_sheet['properties']['title']}' with formatting inherited from {formatting_source}"
+        return {
+            "successful": True,
+            "message": f"Successfully created new row at position {new_row_number} (index {insert_index}) in sheet '{target_sheet['properties']['title']}' with formatting inherited from {formatting_source}",
+            "row_number": new_row_number,
+            "row_index": insert_index,
+            "sheet_name": target_sheet['properties']['title'],
+            "formatting_source": formatting_source
+        }
         
     except Exception as e:
-        return f"Error creating spreadsheet row: {str(e)}"
+        return {
+            "successful": False,
+            "message": f"Error creating spreadsheet row: {str(e)}",
+            "error": str(e)
+        }
 
 
 @simple_mcp.tool()
-async def delete_dimension(spreadsheet_id: str, sheet_id: int, dimension: str, start_index: int, end_index: int) -> str:
+async def delete_dimension(spreadsheet_id: str, sheet_id: int, dimension: str, start_index: int, end_index: int) -> dict:
     """Tool to delete specified rows or columns from a sheet in a Google spreadsheet. Use when you need to remove a range of rows or columns.
     
     Args:
@@ -1463,28 +1706,47 @@ async def delete_dimension(spreadsheet_id: str, sheet_id: int, dimension: str, s
         start_index: The starting index of the range to delete (0-based, inclusive)
         end_index: The ending index of the range to delete (0-based, exclusive)
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     if not spreadsheet_id:
-        return "Error: Spreadsheet ID must be specified"
+        return {
+            "successful": False,
+            "message": "Error: Spreadsheet ID must be specified",
+            "error": "Missing spreadsheet ID"
+        }
     
     # Validate dimension parameter
     if dimension.upper() not in ['ROWS', 'COLUMNS']:
-        return "Error: dimension must be either 'ROWS' or 'COLUMNS'"
+        return {
+            "successful": False,
+            "message": "Error: dimension must be either 'ROWS' or 'COLUMNS'",
+            "error": "Invalid dimension parameter",
+            "valid_dimensions": ['ROWS', 'COLUMNS']
+        }
     
     # Validate index parameters
     if start_index < 0:
-        return "Error: start_index must be non-negative"
+        return {
+            "successful": False,
+            "message": "Error: start_index must be non-negative",
+            "error": "Invalid start_index"
+        }
     
     if end_index <= start_index:
-        return "Error: end_index must be greater than start_index"
+        return {
+            "successful": False,
+            "message": "Error: end_index must be greater than start_index",
+            "error": "Invalid end_index"
+        }
     
     try:
         # Build the Sheets service
@@ -1494,7 +1756,11 @@ async def delete_dimension(spreadsheet_id: str, sheet_id: int, dimension: str, s
         try:
             spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         except Exception as e:
-            return f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}",
+                "error": str(e)
+            }
         
         # Check if spreadsheet has at least one worksheet
         if 'sheets' not in spreadsheet or len(spreadsheet['sheets']) == 0:
@@ -1509,7 +1775,13 @@ async def delete_dimension(spreadsheet_id: str, sheet_id: int, dimension: str, s
         
         if not target_sheet:
             available_sheets = [f"{sheet['properties']['title']} (ID: {sheet['properties']['sheetId']})" for sheet in spreadsheet['sheets']]
-            return f"Error: Sheet with ID {sheet_id} not found. Available sheets: {', '.join(available_sheets)}"
+            return {
+                "successful": False,
+                "message": f"Error: Sheet with ID {sheet_id} not found. Available sheets: {', '.join(available_sheets)}",
+                "error": "Sheet not found",
+                "sheet_id": sheet_id,
+                "available_sheets": available_sheets
+            }
         
         # Get current sheet dimensions
         current_row_count = target_sheet['properties']['gridProperties']['rowCount']
@@ -1518,13 +1790,27 @@ async def delete_dimension(spreadsheet_id: str, sheet_id: int, dimension: str, s
         # Validate indices against current dimensions
         if dimension.upper() == 'ROWS':
             if end_index > current_row_count:
-                return f"Error: end_index ({end_index}) exceeds current row count ({current_row_count})"
+                return {
+                    "successful": False,
+                    "message": f"Error: end_index ({end_index}) exceeds current row count ({current_row_count})",
+                    "error": "Index out of bounds",
+                    "end_index": end_index,
+                    "current_row_count": current_row_count,
+                    "dimension": dimension
+                }
             dimension_name = "rows"
             start_display = start_index + 1  # Convert to 1-based for user display
             end_display = end_index
         else:  # COLUMNS
             if end_index > current_col_count:
-                return f"Error: end_index ({end_index}) exceeds current column count ({current_col_count})"
+                return {
+                    "successful": False,
+                    "message": f"Error: end_index ({end_index}) exceeds current column count ({current_col_count})",
+                    "error": "Index out of bounds",
+                    "end_index": end_index,
+                    "current_column_count": current_col_count,
+                    "dimension": dimension
+                }
             dimension_name = "columns"
             start_display = chr(ord('A') + start_index)  # Convert to column letter
             end_display = chr(ord('A') + end_index - 1)
@@ -1552,30 +1838,48 @@ async def delete_dimension(spreadsheet_id: str, sheet_id: int, dimension: str, s
         # Calculate the number of deleted items
         deleted_count = end_index - start_index
         
-        return f"Successfully deleted {deleted_count} {dimension_name} from sheet '{target_sheet['properties']['title']}' (range: {start_display} to {end_display})"
+        return {
+            "successful": True,
+            "message": f"Successfully deleted {deleted_count} {dimension_name} from sheet '{target_sheet['properties']['title']}' (range: {start_display} to {end_display})",
+            "deleted_count": deleted_count,
+            "dimension": dimension_name,
+            "sheet_name": target_sheet['properties']['title'],
+            "range": f"{start_display} to {end_display}"
+        }
         
     except Exception as e:
-        return f"Error deleting {dimension.lower()}: {str(e)}"
+        return {
+            "successful": False,
+            "message": f"Error deleting {dimension.lower()}: {str(e)}",
+            "error": str(e),
+            "dimension": dimension
+        }
 
 
 @simple_mcp.tool()
-async def delete_spreadsheet(spreadsheet_id: str) -> str:
+async def delete_spreadsheet(spreadsheet_id: str) -> dict:
     """Tool to delete an entire Google Spreadsheet from Google Drive. Use when you need to permanently remove a spreadsheet document.
     
     Args:
         spreadsheet_id: The ID of the Google Sheet (found in the URL) to delete
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     if not spreadsheet_id:
-        return "Error: Spreadsheet ID must be specified"
+        return {
+            "successful": False,
+            "message": "Error: Spreadsheet ID must be specified",
+            "error": "Missing spreadsheet ID"
+        }
     
     try:
         # Build the Drive service
@@ -1588,15 +1892,31 @@ async def delete_spreadsheet(spreadsheet_id: str) -> str:
                 fields='id,name,mimeType,trashed'
             ).execute()
         except Exception as e:
-            return f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}",
+                "error": str(e)
+            }
         
         # Verify it's actually a Google Spreadsheet
         if file.get('mimeType') != 'application/vnd.google-apps.spreadsheet':
-            return f"Error: The specified ID does not correspond to a Google Spreadsheet. File type: {file.get('mimeType', 'Unknown')}"
+            return {
+                "successful": False,
+                "message": f"Error: The specified ID does not correspond to a Google Spreadsheet. File type: {file.get('mimeType', 'Unknown')}",
+                "error": "Invalid file type",
+                "file_type": file.get('mimeType', 'Unknown'),
+                "spreadsheet_id": spreadsheet_id
+            }
         
         # Check if file is already in trash
         if file.get('trashed', False):
-            return f"Error: The spreadsheet '{file.get('name')}' is already in the trash"
+            return {
+                "successful": False,
+                "message": f"Error: The spreadsheet '{file.get('name')}' is already in the trash",
+                "error": "Already deleted",
+                "file_name": file.get('name'),
+                "spreadsheet_id": spreadsheet_id
+            }
         
         # Get file details for confirmation
         file_name = file.get('name')
@@ -1604,31 +1924,47 @@ async def delete_spreadsheet(spreadsheet_id: str) -> str:
         # Delete the spreadsheet
         service.files().delete(fileId=spreadsheet_id).execute()
         
-        return f"Successfully deleted Google Spreadsheet '{file_name}' (ID: {spreadsheet_id}) from Google Drive"
+        return {
+            "successful": True,
+            "message": f"Successfully deleted Google Spreadsheet '{file_name}' (ID: {spreadsheet_id}) from Google Drive",
+            "file_name": file_name,
+            "spreadsheet_id": spreadsheet_id
+        }
         
     except Exception as e:
-        return f"Error deleting spreadsheet: {str(e)}"
+        return {
+            "successful": False,
+            "message": f"Error deleting spreadsheet: {str(e)}",
+            "error": str(e),
+            "spreadsheet_id": spreadsheet_id
+        }
 
 
 @simple_mcp.tool()
-async def delete_sheet(spreadsheet_id: str, sheet_id: int) -> str:
+async def delete_sheet(spreadsheet_id: str, sheet_id: int) -> dict:
     """Tool to delete a sheet (worksheet) from a spreadsheet. Use when you need to remove a specific sheet from a Google sheet document.
     
     Args:
         spreadsheet_id: The ID of the Google Sheet (found in the URL)
         sheet_id: The ID of the specific sheet/tab to delete (integer)
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     if not spreadsheet_id:
-        return "Error: Spreadsheet ID must be specified"
+        return {
+            "successful": False,
+            "message": "Error: Spreadsheet ID must be specified",
+            "error": "Missing spreadsheet ID"
+        }
     
     try:
         # Build the Sheets service
@@ -1638,7 +1974,11 @@ async def delete_sheet(spreadsheet_id: str, sheet_id: int) -> str:
         try:
             spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         except Exception as e:
-            return f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}",
+                "error": str(e)
+            }
         
         # Check if spreadsheet has at least one worksheet
         if 'sheets' not in spreadsheet or len(spreadsheet['sheets']) == 0:
@@ -1653,11 +1993,23 @@ async def delete_sheet(spreadsheet_id: str, sheet_id: int) -> str:
         
         if not target_sheet:
             available_sheets = [f"{sheet['properties']['title']} (ID: {sheet['properties']['sheetId']})" for sheet in spreadsheet['sheets']]
-            return f"Error: Sheet with ID {sheet_id} not found. Available sheets: {', '.join(available_sheets)}"
+            return {
+                "successful": False,
+                "message": f"Error: Sheet with ID {sheet_id} not found. Available sheets: {', '.join(available_sheets)}",
+                "error": "Sheet not found",
+                "sheet_id": sheet_id,
+                "available_sheets": available_sheets
+            }
         
         # Prevent deletion of the last sheet (Google Sheets requires at least one sheet)
         if len(spreadsheet['sheets']) == 1:
-            return "Error: Cannot delete the last remaining sheet. Use delete_spreadsheet instead."
+            return {
+                "successful": False,
+                "message": "Error: Cannot delete the last remaining sheet. Use delete_spreadsheet instead.",
+                "error": "Cannot delete last sheet",
+                "sheet_id": sheet_id,
+                "spreadsheet_id": spreadsheet_id
+            }
         
         # Get sheet details for confirmation
         sheet_title = target_sheet['properties']['title']
@@ -1678,10 +2030,23 @@ async def delete_sheet(spreadsheet_id: str, sheet_id: int) -> str:
             }
         ).execute()
         
-        return f"Successfully deleted sheet '{sheet_title}' (ID: {sheet_id}, was at position {sheet_index + 1}) from the spreadsheet"
+        return {
+            "successful": True,
+            "message": f"Successfully deleted sheet '{sheet_title}' (ID: {sheet_id}, was at position {sheet_index + 1}) from the spreadsheet",
+            "sheet_title": sheet_title,
+            "sheet_id": sheet_id,
+            "position": sheet_index + 1,
+            "spreadsheet_id": spreadsheet_id
+        }
         
     except Exception as e:
-        return f"Error deleting sheet: {str(e)}"
+        return {
+            "successful": False,
+            "message": f"Error deleting sheet: {str(e)}",
+            "error": str(e),
+            "sheet_id": sheet_id,
+            "spreadsheet_id": spreadsheet_id
+        }
 
 
 @simple_mcp.tool()
@@ -1692,20 +2057,19 @@ async def find_worksheet_by_title(spreadsheet_id: str, title: str) -> dict:
         spreadsheet_id: The ID of the Google Sheet (found in the URL)
         title: The exact, case-sensitive title of the worksheet (tab name) to find
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "found": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "worksheet_info": None,
-                "spreadsheet_metadata": None,
-                "all_worksheets": []
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "found": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "worksheet_info": None,
+            "spreadsheet_metadata": None,
+            "all_worksheets": []
+        }
     
     if not spreadsheet_id:
         return {
@@ -1818,7 +2182,7 @@ async def find_worksheet_by_title(spreadsheet_id: str, title: str) -> dict:
 
 
 @simple_mcp.tool()
-async def format_cell(spreadsheet_id: str, worksheet_id: int, start_row_index: int, end_row_index: int, start_column_index: int, end_column_index: int, bold: bool = False, italic: bool = False, underline: bool = False, strikethrough: bool = False, fontSize: int = 10, red: float = 0.9, green: float = 0.9, blue: float = 0.9) -> str:
+async def format_cell(spreadsheet_id: str, worksheet_id: int, start_row_index: int, end_row_index: int, start_column_index: int, end_column_index: int, bold: bool = False, italic: bool = False, underline: bool = False, strikethrough: bool = False, fontSize: int = 10, red: float = 0.9, green: float = 0.9, blue: float = 0.9) -> dict:
     """Applies text and background cell formatting to a specified range in a Google Sheets worksheet.
     
     Args:
@@ -1837,30 +2201,52 @@ async def format_cell(spreadsheet_id: str, worksheet_id: int, start_row_index: i
         green: Green component of background color (0.0-1.0, default: 0.9)
         blue: Blue component of background color (0.0-1.0, default: 0.9)
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate"
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"]
+        }
     
     if not spreadsheet_id:
-        return "Error: Spreadsheet ID must be specified"
+        return {
+            "successful": False,
+            "message": "Error: Spreadsheet ID must be specified",
+            "error": "Missing spreadsheet ID"
+        }
     
     # Validate index parameters
     if start_row_index < 0 or end_row_index < 0:
-        return "Error: Row indices must be non-negative"
+        return {
+            "successful": False,
+            "message": "Error: Row indices must be non-negative",
+            "error": "Invalid row indices"
+        }
     
     if start_column_index < 0 or end_column_index < 0:
-        return "Error: Column indices must be non-negative"
+        return {
+            "successful": False,
+            "message": "Error: Column indices must be non-negative",
+            "error": "Invalid column indices"
+        }
     
     if end_row_index <= start_row_index:
-        return "Error: end_row_index must be greater than start_row_index"
+        return {
+            "successful": False,
+            "message": "Error: end_row_index must be greater than start_row_index",
+            "error": "Invalid row range"
+        }
     
     if end_column_index <= start_column_index:
-        return "Error: end_column_index must be greater than start_column_index"
+        return {
+            "successful": False,
+            "message": "Error: end_column_index must be greater than start_column_index",
+            "error": "Invalid column range"
+        }
     
     try:
         # Build the Sheets service
@@ -1870,7 +2256,11 @@ async def format_cell(spreadsheet_id: str, worksheet_id: int, start_row_index: i
         try:
             spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         except Exception as e:
-            return f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}"
+            return {
+                "successful": False,
+                "message": f"Error: Could not access spreadsheet. Make sure the ID is correct and you have access. Details: {str(e)}",
+                "error": str(e)
+            }
         
         # Check if spreadsheet has at least one worksheet
         if 'sheets' not in spreadsheet or len(spreadsheet['sheets']) == 0:
@@ -1885,7 +2275,13 @@ async def format_cell(spreadsheet_id: str, worksheet_id: int, start_row_index: i
         
         if not target_worksheet:
             available_sheets = [f"{sheet['properties']['title']} (ID: {sheet['properties']['sheetId']})" for sheet in spreadsheet['sheets']]
-            return f"Error: Worksheet with ID {worksheet_id} not found. Available worksheets: {', '.join(available_sheets)}"
+            return {
+                "successful": False,
+                "message": f"Error: Worksheet with ID {worksheet_id} not found. Available worksheets: {', '.join(available_sheets)}",
+                "error": "Worksheet not found",
+                "worksheet_id": worksheet_id,
+                "available_worksheets": available_sheets
+            }
         
         # Get worksheet details for confirmation
         worksheet_title = target_worksheet['properties']['title']
@@ -1934,10 +2330,21 @@ async def format_cell(spreadsheet_id: str, worksheet_id: int, start_row_index: i
         start_col_display = chr(ord('A') + start_column_index)
         end_col_display = chr(ord('A') + end_column_index - 1)
         
-        return f"Successfully formatted range {start_col_display}{start_row_display}:{end_col_display}{end_row_display} in worksheet '{worksheet_title}'"
+        return {
+            "successful": True,
+            "message": f"Successfully formatted range {start_col_display}{start_row_display}:{end_col_display}{end_row_display} in worksheet '{worksheet_title}'",
+            "range": f"{start_col_display}{start_row_display}:{end_col_display}{end_row_display}",
+            "worksheet_title": worksheet_title,
+            "worksheet_id": worksheet_id
+        }
         
     except Exception as e:
-        return f"Error formatting cells: {str(e)}"
+        return {
+            "successful": False,
+            "message": f"Error formatting cells: {str(e)}",
+            "error": str(e),
+            "worksheet_id": worksheet_id
+        }
 
 
 @simple_mcp.tool()
@@ -1947,20 +2354,19 @@ async def get_sheet_names(spreadsheet_id: str) -> dict:
     Args:
         spreadsheet_id: The ID of the Google Sheet (found in the URL)
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "sheet_names": [],
-                "sheet_count": 0,
-                "spreadsheet_info": None
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "sheet_names": [],
+            "sheet_count": 0,
+            "spreadsheet_info": None
+        }
     
     if not spreadsheet_id:
         return {
@@ -2060,20 +2466,18 @@ async def get_spreadsheet_by_data_filter(spreadsheet_id: str, data_filters: list
         include_grid_data: Whether to include the actual data in the response (default: False)
         exclude_tables_in_banded_ranges: Whether to exclude tables in banded ranges (default: False)
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "spreadsheet_data": None,
-                "filtered_ranges": [],
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "spreadsheet_data": None,
+            "filtered_ranges": []
+        }
     
     if not spreadsheet_id:
         return {
@@ -2234,20 +2638,18 @@ async def get_spreadsheet_info(spreadsheet_id: str) -> dict:
     Args:
         spreadsheet_id: The ID of the Google Sheet (found in the URL)
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "spreadsheet_info": None,
-                "sheets_info": [],
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "spreadsheet_info": None,
+            "sheets_info": []
+        }
     
     if not spreadsheet_id:
         return {
@@ -2373,20 +2775,18 @@ async def get_table_schema(spreadsheet_id: str, table_name: str, sheet_name: str
         sheet_name: Sheet/tab name if table_name is ambiguous across multiple sheets
         sample_size: Number of rows to sample for type inference (default: 50, max: 1000)
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "schema": None,
-                "table_info": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "schema": None,
+            "table_info": None
+        }
     
     if not spreadsheet_id:
         return {
@@ -2733,19 +3133,17 @@ async def insert_dimension(spreadsheet_id: str, insert_dimension: dict, include_
         response_include_grid_data: True if grid data should be included in the response
         response_ranges: Limits the ranges of the spreadsheet to include in the response
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "spreadsheet": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "spreadsheet": None
+        }
     
     if not spreadsheet_id:
         return {
@@ -2899,19 +3297,17 @@ async def list_tables(spreadsheet_id: str, min_rows: int = 2, min_columns: int =
         min_columns: Minimum number of columns to consider a valid table (default: 1)
         min_confidence: Minimum confidence score (0.0-1.0) to consider a valid table (default: 0.5)
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "tables": [],
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "tables": []
+        }
     
     if not spreadsheet_id:
         return {
@@ -3433,19 +3829,17 @@ async def lookup_spreadsheet_row(spreadsheet_id: str, query: str, range: str | N
                (e.g., 'SheetName!A1:Z100')
         case_sensitive: If True, the query string search is case-sensitive
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "found_row": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "found_row": None
+        }
     
     if not spreadsheet_id:
         return {
@@ -3617,19 +4011,17 @@ async def search_developer_metadata(spreadsheet_id: str, data_filters: list) -> 
             - DataFilter object with a1Range, gridRange, or developerMetadataLookup
             - Developer metadata lookup object with specific criteria
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "metadata_results": [],
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "metadata_results": []
+        }
     
     if not spreadsheet_id:
         return {
@@ -3816,19 +4208,17 @@ async def search_spreadsheets(query: str | None = None, max_results: int = 10, o
         created_after: Return spreadsheets created after this date. Use RFC 3339 format like '2024-01-01T00:00:00Z'.
         modified_after: Return spreadsheets modified after this date. Use RFC 3339 format like '2024-01-01T00:00:00Z'.
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "spreadsheets": [],
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "spreadsheets": []
+        }
     
     # Validate parameters
     if max_results < 1 or max_results > 1000:
@@ -4151,19 +4541,17 @@ async def set_basic_filter(spreadsheet_id: str, filter: dict) -> dict:
             - criteria: Optional filter criteria for specific columns
             - sort_specs: Optional sort specifications
     """
-    global creds
-
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "filter": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "filter": None
+        }
     
     if not spreadsheet_id:
         return {
@@ -4322,19 +4710,17 @@ async def create_sheet_from_json(title: str, sheet_name: str, sheet_json: list) 
         sheet_json: Array of objects where the first item's keys establish the headers. 
                    Each object should have the same keys as the first item.
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "spreadsheet_id": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "spreadsheet_id": None
+        }
     
     if not title:
         return {
@@ -4539,20 +4925,18 @@ async def copy_sheet_to_another_spreadsheet(spreadsheet_id: str, sheet_id: int, 
         sheet_id: The ID of the sheet to copy (integer)
         destination_spreadsheet_id: The ID of the destination spreadsheet where the sheet will be copied
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "source_spreadsheet_id": None,
-                "destination_spreadsheet_id": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "source_spreadsheet_id": None,
+            "destination_spreadsheet_id": None
+        }
     
     if not spreadsheet_id:
         return {
@@ -4766,19 +5150,17 @@ async def append_values_to_spreadsheet(spreadsheetId: str, range: str, values: l
         responseValueRenderOption: Determines how values in the response should be rendered
         responseDateTimeRenderOption: Determines how dates, times, and durations in the response should be rendered
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "spreadsheetId": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "spreadsheetId": None
+        }
     
     if not spreadsheetId:
         return {
@@ -4966,19 +5348,17 @@ async def batch_clear_spreadsheet_values(spreadsheet_id: str, ranges: list) -> d
         spreadsheet_id: The ID of the spreadsheet to clear values from
         ranges: Array of A1 notation ranges to clear (e.g., ["Sheet1!A1:B5", "Sheet2!C3:D8"])
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "spreadsheet_id": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "spreadsheet_id": None
+        }
     
     if not spreadsheet_id:
         return {
@@ -5171,19 +5551,17 @@ async def batch_clear_values_by_data_filter(spreadsheetId: str, dataFilters: lis
         dataFilters: Array of data filters to match ranges for clearing
         Example: "dataFilters": ["Sheet1!A1:B5","Sheet1!D3:F8","Sheet2!C1:C10"]
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "spreadsheetId": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "spreadsheetId": None
+        }
     
     if not spreadsheetId:
         return {
@@ -5380,19 +5758,17 @@ async def batch_get_spreadsheet_values_by_data_filter(spreadsheetId: str, dataFi
         valueRenderOption: Determines how values in the response should be rendered
         dateTimeRenderOption: Determines how dates, times, and durations in the response should be rendered
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "spreadsheetId": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "spreadsheetId": None
+        }
     
     if not spreadsheetId:
         return {
@@ -5647,19 +6023,17 @@ async def update_sheet_properties(spreadsheetId: str, updateSheetProperties: dic
         }
     }
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "spreadsheetId": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "spreadsheetId": None
+        }
     
     if not spreadsheetId:
         return {
@@ -5930,19 +6304,17 @@ async def update_spreadsheet_properties(spreadsheetId: str, properties: dict, fi
         "fields": "timeZone,locale"
     }
     """
-    global creds
-    
-    # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            return {
-                "successful": False,
-                "message": "Please set GSHEETS_CREDENTIALS_PATH and GSHEETS_TOKEN_PATH environment variables and authenticate",
-                "spreadsheetId": None,
-                "error": "Authentication required"
-            }
+    # Check credentials first
+    creds_valid, error_msg = check_credentials()
+    if not creds_valid:
+        error_response = get_auth_error_response()
+        return {
+            "successful": False,
+            "message": error_response["message"],
+            "error": error_response["error"],
+            "instructions": error_response["instructions"],
+            "spreadsheetId": None
+        }
     
     if not spreadsheetId:
         return {
